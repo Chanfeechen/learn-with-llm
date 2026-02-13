@@ -1,0 +1,65 @@
+{
+  "seed": 123,
+  "grid_size": [16, 16, 16],
+  "obstacle_density": 0.2,
+  "start": [1, 1, 1],
+  "goal": [14, 14, 14],
+  "num_control_points": 8,
+  "num_samples": 80,
+  "steps": 45,
+  "gradient_eps": 0.001,
+  "init_noise_scale": 0.9,
+  "clip_grad_norm": 5.0,
+  "blur_passes": 3,
+  "weights": {
+    "length": 1.0,
+    "smoothness": 0.25,
+    "obstacle": 7.5,
+    "boundary": 4.0,
+    "local_optima": 1.8
+  },
+  "local_optima": {
+    "enabled": true,
+    "count": 3,
+    "strength": 1.0,
+    "radius": 2.5,
+    "min_distance_from_path": 3.0
+  },
+  "optimizers": {
+    "sgd": {
+      "enabled": true,
+      "lr": 0.03
+    },
+    "sgd_momentum": {
+      "enabled": true,
+      "lr": 0.02,
+      "mu": 0.9
+    },
+    "adagrad": {
+      "enabled": true,
+      "lr": 0.18,
+      "eps": 1e-8
+    },
+    "rmsprop": {
+      "enabled": true,
+      "lr": 0.035,
+      "rho": 0.9,
+      "eps": 1e-8
+    },
+    "adam": {
+      "enabled": true,
+      "lr": 0.03,
+      "beta1": 0.9,
+      "beta2": 0.999,
+      "eps": 1e-8
+    },
+    "adamw": {
+      "enabled": true,
+      "lr": 0.03,
+      "beta1": 0.9,
+      "beta2": 0.999,
+      "eps": 1e-8,
+      "weight_decay": 0.01
+    }
+  }
+}
