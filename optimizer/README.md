@@ -1,39 +1,31 @@
 # Optimizer Experiment Runner
 
-This folder contains a seeded 3D maze testbed for comparing optimizers.
+This folder runs a mountain-surface benchmark where optimizers search for the global peak.
 
 ## What is implemented
-- Seeded 3D maze generation with connectivity validation.
-- Optional local-optima attractors to create non-convex behavior.
-- Path objective with length, smoothness, obstacle, boundary, and local-optima terms.
+- Seeded 2D mountain surface `z = f(x, y)`.
+- One dominant global peak and configurable smaller local peaks.
+- Real surface rendering in 3D and contour views.
+- Optimizer runs with stop-on-convergence or stop-on-optimum criteria.
 - Optimizers: SGD, SGD with momentum, AdaGrad, RMSProp, Adam, AdamW.
-- End-to-end runner that outputs a JSON log of optimizer behavior.
-- Optional plots (`metrics.png`, `paths.png`) when matplotlib is installed.
+- End-to-end runner with JSON logs and animation.
 
 ## Run
 ```bash
-python3 /Users/chanfee/projects/learn-with-llm/optimizer/run_experiment.py
+python /Users/chanfee/projects/learn-with-llm/optimizer/run_experiment.py
 ```
 
-Optional custom paths:
-```bash
-python3 /Users/chanfee/projects/learn-with-llm/optimizer/run_experiment.py \
-  --config /Users/chanfee/projects/learn-with-llm/optimizer/config/default_config.json \
-  --output-dir /Users/chanfee/projects/learn-with-llm/optimizer/artifacts
-```
-
-## Key config fields
+## Key config
 File: `/Users/chanfee/projects/learn-with-llm/optimizer/config/default_config.json`
 
-- `seed`: reproducibility for maze + initialization.
-- `grid_size`, `obstacle_density`: maze structure.
-- `num_control_points`, `num_samples`: path representation and sampling.
-- `weights.*`: objective term weights.
-- `local_optima.enabled`: turn local minima on/off.
-- `local_optima.count`, `strength`, `radius`, `min_distance_from_path`: local-optima behavior.
+- `surface.*`: controls global/local peaks and noise.
+- `stopping.*`: convergence and optimum stop criteria.
+- `animation.*`: GIF sampling and speed.
 - `optimizers.*`: per-optimizer hyperparameters.
 
 ## Outputs
 - `/Users/chanfee/projects/learn-with-llm/optimizer/artifacts/results.json`
-- `/Users/chanfee/projects/learn-with-llm/optimizer/artifacts/metrics.png` (optional)
-- `/Users/chanfee/projects/learn-with-llm/optimizer/artifacts/paths.png` (optional)
+- `/Users/chanfee/projects/learn-with-llm/optimizer/artifacts/surface_3d.png`
+- `/Users/chanfee/projects/learn-with-llm/optimizer/artifacts/surface_contour.png`
+- `/Users/chanfee/projects/learn-with-llm/optimizer/artifacts/metrics.png`
+- `/Users/chanfee/projects/learn-with-llm/optimizer/artifacts/optimizer_surface_animation.gif`

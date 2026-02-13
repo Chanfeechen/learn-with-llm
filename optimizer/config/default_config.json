@@ -1,54 +1,80 @@
 {
   "seed": 123,
-  "grid_size": [16, 16, 16],
-  "obstacle_density": 0.2,
-  "start": [1, 1, 1],
-  "goal": [14, 14, 14],
-  "num_control_points": 8,
-  "num_samples": 80,
-  "steps": 45,
+  "domain": [0.0, 1.0],
+  "grid_resolution": 220,
+  "max_iters": 800,
   "gradient_eps": 0.001,
-  "init_noise_scale": 0.9,
-  "clip_grad_norm": 5.0,
-  "blur_passes": 3,
+  "init_noise_scale": 0.01,
+  "clip_grad_norm": 1.5,
+  "initial_point": null,
   "weights": {
-    "length": 1.0,
-    "smoothness": 0.25,
-    "obstacle": 7.5,
-    "boundary": 4.0,
-    "local_optima": 1.8
+    "height": 1.0,
+    "boundary": 2.0
   },
-  "local_optima": {
+  "surface": {
+    "global_peak": {
+      "amp": 1.0,
+      "sigma": 0.11
+    },
+    "local_peaks": {
+      "count": 6,
+      "amp_range": [0.2, 0.65],
+      "sigma_range": [0.04, 0.11],
+      "min_dist_global": 0.20,
+      "min_dist_local": 0.10
+    },
+    "noise": {
+      "enabled": true,
+      "scale": 0.03,
+      "blur_passes": 2
+    },
+    "global_trend": {
+      "enabled": true,
+      "strength": 0.12
+    },
+    "acceptance": {
+      "max_peak_shift": 0.07
+    }
+  },
+  "stopping": {
+    "target_tol": 0.01,
+    "height_tol": 0.005,
+    "loss_tol": 0.0000005,
+    "progress_tol": 0.00012,
+    "grad_tol": 0.00008,
+    "step_tol": 0.00004,
+    "patience": 35
+  },
+  "animation": {
     "enabled": true,
-    "count": 3,
-    "strength": 1.0,
-    "radius": 2.5,
-    "min_distance_from_path": 3.0
+    "fps": 12,
+    "stride": 2,
+    "max_frames": 240
   },
   "optimizers": {
     "sgd": {
       "enabled": true,
-      "lr": 0.03
+      "lr": 0.012
     },
     "sgd_momentum": {
       "enabled": true,
-      "lr": 0.02,
+      "lr": 0.018,
       "mu": 0.9
     },
     "adagrad": {
       "enabled": true,
-      "lr": 0.18,
+      "lr": 0.10,
       "eps": 1e-8
     },
     "rmsprop": {
       "enabled": true,
-      "lr": 0.035,
+      "lr": 0.032,
       "rho": 0.9,
       "eps": 1e-8
     },
     "adam": {
       "enabled": true,
-      "lr": 0.03,
+      "lr": 0.035,
       "beta1": 0.9,
       "beta2": 0.999,
       "eps": 1e-8
@@ -59,7 +85,7 @@
       "beta1": 0.9,
       "beta2": 0.999,
       "eps": 1e-8,
-      "weight_decay": 0.01
+      "weight_decay": 0.001
     }
   }
 }

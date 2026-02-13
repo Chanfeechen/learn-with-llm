@@ -1,200 +1,232 @@
-"""Seeded 3D maze generation for optimizer experiments."""
+"""Seeded mountain-surface generation for optimizer convergence tests."""
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
 
 
 @dataclass(frozen=True)
-class LocalOptimaConfig:
-  enabled: bool
+class GlobalPeakConfig:
+  amp: float
+  sigma: float
+
+
+@dataclass(frozen=True)
+class LocalPeaksConfig:
   count: int
-  strength: float
-  radius: float
-  min_distance_from_path: float
+  amp_range: tuple[float, float]
+  sigma_range: tuple[float, float]
+  min_dist_global: float
+  min_dist_local: float
 
 
 @dataclass(frozen=True)
-class MazeSpec:
-  grid_size: tuple[int, int, int]
-  obstacle_density: float
-  start: tuple[int, int, int]
-  goal: tuple[int, int, int]
+class NoiseConfig:
+  enabled: bool
+  scale: float
   blur_passes: int
-  local_optima: LocalOptimaConfig
 
 
 @dataclass(frozen=True)
-class MazeData:
-  occupancy: np.ndarray
-  obstacle_field: np.ndarray
-  field_gradient: np.ndarray
-  start: np.ndarray
-  goal: np.ndarray
-  attractors: np.ndarray
+class GlobalTrendConfig:
+  enabled: bool
+  strength: float
 
 
-def _neighbors(idx: tuple[int, int, int], shape: tuple[int, int, int]):
-  x, y, z = idx
-  max_x, max_y, max_z = shape
-  candidates = (
-      (x - 1, y, z),
-      (x + 1, y, z),
-      (x, y - 1, z),
-      (x, y + 1, z),
-      (x, y, z - 1),
-      (x, y, z + 1),
-  )
-  for nx, ny, nz in candidates:
-    if 0 <= nx < max_x and 0 <= ny < max_y and 0 <= nz < max_z:
-      yield (nx, ny, nz)
+@dataclass(frozen=True)
+class AcceptanceConfig:
+  max_peak_shift: float
 
 
-def _is_connected(
-    occupancy: np.ndarray,
-    start: tuple[int, int, int],
-    goal: tuple[int, int, int],
-) -> bool:
-  """Checks if start and goal are connected through free cells."""
-  if occupancy[start] or occupancy[goal]:
-    return False
-
-  visited = np.zeros_like(occupancy, dtype=bool)
-  queue: deque[tuple[int, int, int]] = deque([start])
-  visited[start] = True
-
-  while queue:
-    current = queue.popleft()
-    if current == goal:
-      return True
-    for nxt in _neighbors(current, occupancy.shape):
-      if visited[nxt] or occupancy[nxt]:
-        continue
-      visited[nxt] = True
-      queue.append(nxt)
-
-  return False
+@dataclass(frozen=True)
+class SurfaceConfig:
+  global_peak: GlobalPeakConfig
+  local_peaks: LocalPeaksConfig
+  noise: NoiseConfig
+  global_trend: GlobalTrendConfig
+  acceptance: AcceptanceConfig
 
 
-def _blur3d(volume: np.ndarray) -> np.ndarray:
-  """Applies a 3x3x3 mean filter using only NumPy."""
-  padded = np.pad(volume, 1, mode="edge")
-  out = np.zeros_like(volume, dtype=float)
+@dataclass(frozen=True)
+class TerrainSpec:
+  domain: tuple[float, float]
+  grid_resolution: int
+  surface: SurfaceConfig
+
+
+@dataclass(frozen=True)
+class TerrainData:
+  x_coords: np.ndarray
+  y_coords: np.ndarray
+  surface: np.ndarray
+  global_peak_point: np.ndarray
+  global_peak_height: float
+  local_peak_points: np.ndarray
+  planted_global_peak_point: np.ndarray
+
+
+def _blur2d(values: np.ndarray) -> np.ndarray:
+  """Applies a 3x3 mean blur using only NumPy."""
+  padded = np.pad(values, ((1, 1), (1, 1)), mode="edge")
+  out = np.zeros_like(values, dtype=float)
   for dx in range(3):
     for dy in range(3):
-      for dz in range(3):
-        out += padded[
-            dx : dx + volume.shape[0],
-            dy : dy + volume.shape[1],
-            dz : dz + volume.shape[2],
-        ]
-  return out / 27.0
+      out += padded[dx : dx + values.shape[0], dy : dy + values.shape[1]]
+  return out / 9.0
 
 
-def _distance_from_line(
-    points: np.ndarray,
-    start: np.ndarray,
-    goal: np.ndarray,
+def _gaussian_hill(
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    center: np.ndarray,
+    amp: float,
+    sigma: float,
 ) -> np.ndarray:
-  """Computes point-to-segment distances for candidate attractor cells."""
-  direction = goal - start
-  denom = float(np.dot(direction, direction))
-  if denom < 1e-12:
-    return np.linalg.norm(points - start, axis=1)
-  rel = points - start
-  t = np.clip(np.dot(rel, direction) / denom, 0.0, 1.0)
-  projection = start + t[:, None] * direction
-  return np.linalg.norm(points - projection, axis=1)
+  """Evaluates a Gaussian hill over a 2D grid."""
+  dx = x_grid - center[0]
+  dy = y_grid - center[1]
+  dist2 = dx * dx + dy * dy
+  sigma2 = max(1e-12, sigma * sigma)
+  return amp * np.exp(-dist2 / (2.0 * sigma2))
 
 
-def _build_obstacle_field(
-    occupancy: np.ndarray,
-    blur_passes: int,
-) -> tuple[np.ndarray, np.ndarray]:
-  """Builds a smooth obstacle potential and its gradient."""
-  field = occupancy.astype(float)
-  for _ in range(max(1, blur_passes)):
-    field = _blur3d(field)
-
-  max_value = float(np.max(field))
-  if max_value > 0.0:
-    field = field / max_value
-
-  grad_x, grad_y, grad_z = np.gradient(field)
-  gradient = np.stack([grad_x, grad_y, grad_z], axis=-1)
-  return field, gradient
-
-
-def _sample_attractors(
-    occupancy: np.ndarray,
-    start: np.ndarray,
-    goal: np.ndarray,
-    cfg: LocalOptimaConfig,
+def _sample_global_peak(
+    domain: tuple[float, float],
     rng: np.random.Generator,
 ) -> np.ndarray:
-  """Samples attractor centers to induce local optima."""
-  if not cfg.enabled or cfg.count <= 0:
-    return np.zeros((0, 3), dtype=float)
+  """Samples a global-peak center away from boundaries."""
+  low, high = domain
+  size = high - low
+  margin = 0.15 * size
+  return rng.uniform(low + margin, high - margin, size=2)
 
-  free_cells = np.argwhere(~occupancy)
-  if len(free_cells) == 0:
-    return np.zeros((0, 3), dtype=float)
 
-  free_points = free_cells.astype(float)
-  line_dist = _distance_from_line(free_points, start, goal)
-  candidates = free_points[line_dist >= cfg.min_distance_from_path]
-  if len(candidates) == 0:
-    return np.zeros((0, 3), dtype=float)
+def _sample_local_peaks(
+    domain: tuple[float, float],
+    global_peak: np.ndarray,
+    cfg: LocalPeaksConfig,
+    rng: np.random.Generator,
+) -> np.ndarray:
+  """Samples local peak centers with spacing constraints."""
+  if cfg.count <= 0:
+    return np.zeros((0, 2), dtype=float)
 
-  order = rng.permutation(len(candidates))
+  low, high = domain
   selected: list[np.ndarray] = []
-  min_pair_dist = max(1.0, cfg.radius)
-  for idx in order:
-    point = candidates[idx]
-    if any(np.linalg.norm(point - other) < min_pair_dist for other in selected):
+  attempts = max(200, 200 * cfg.count)
+
+  for _ in range(attempts):
+    candidate = rng.uniform(low, high, size=2)
+    if np.linalg.norm(candidate - global_peak) < cfg.min_dist_global:
       continue
-    selected.append(point)
+    if any(np.linalg.norm(candidate - point) < cfg.min_dist_local for point in selected):
+      continue
+    selected.append(candidate)
     if len(selected) >= cfg.count:
       break
 
   if not selected:
-    return np.zeros((0, 3), dtype=float)
+    return np.zeros((0, 2), dtype=float)
   return np.vstack(selected)
 
 
-def generate_maze(spec: MazeSpec, seed: int, max_retries: int = 100) -> MazeData:
-  """Generates a connected maze and optional local optima attractors."""
-  start = np.asarray(spec.start, dtype=float)
-  goal = np.asarray(spec.goal, dtype=float)
-  shape = spec.grid_size
+def _normalize_surface(surface: np.ndarray) -> np.ndarray:
+  shifted = surface - np.min(surface)
+  max_value = float(np.max(shifted))
+  if max_value > 0.0:
+    shifted /= max_value
+  return shifted
+
+
+def _argmax_point(
+    surface: np.ndarray,
+    x_coords: np.ndarray,
+    y_coords: np.ndarray,
+) -> tuple[np.ndarray, float]:
+  idx = np.unravel_index(int(np.argmax(surface)), surface.shape)
+  y_idx, x_idx = idx
+  point = np.asarray([x_coords[x_idx], y_coords[y_idx]], dtype=float)
+  height = float(surface[y_idx, x_idx])
+  return point, height
+
+
+def generate_terrain(spec: TerrainSpec, seed: int, max_retries: int = 200) -> TerrainData:
+  """Generates a mountain surface with one global and multiple local peaks."""
+  if spec.grid_resolution < 16:
+    raise ValueError("grid_resolution must be at least 16.")
+
+  low, high = spec.domain
+  if not high > low:
+    raise ValueError("domain upper bound must be larger than lower bound.")
+
+  x_coords = np.linspace(low, high, spec.grid_resolution)
+  y_coords = np.linspace(low, high, spec.grid_resolution)
+  x_grid, y_grid = np.meshgrid(x_coords, y_coords, indexing="xy")
 
   for retry in range(max_retries):
     rng = np.random.default_rng(seed + retry)
-    occupancy = rng.random(shape) < spec.obstacle_density
-    occupancy[spec.start] = False
-    occupancy[spec.goal] = False
+    planted_global = _sample_global_peak(spec.domain, rng)
 
-    if not _is_connected(occupancy, spec.start, spec.goal):
-      continue
+    surface = _gaussian_hill(
+        x_grid=x_grid,
+        y_grid=y_grid,
+        center=planted_global,
+        amp=spec.surface.global_peak.amp,
+        sigma=spec.surface.global_peak.sigma,
+    )
 
-    obstacle_field, gradient = _build_obstacle_field(occupancy, spec.blur_passes)
-    attractors = _sample_attractors(
-        occupancy=occupancy,
-        start=start,
-        goal=goal,
-        cfg=spec.local_optima,
+    local_peaks = _sample_local_peaks(
+        domain=spec.domain,
+        global_peak=planted_global,
+        cfg=spec.surface.local_peaks,
         rng=rng,
     )
-    return MazeData(
-      occupancy=occupancy,
-      obstacle_field=obstacle_field,
-      field_gradient=gradient,
-      start=start,
-      goal=goal,
-      attractors=attractors,
+
+    for point in local_peaks:
+      amp = rng.uniform(*spec.surface.local_peaks.amp_range)
+      sigma = rng.uniform(*spec.surface.local_peaks.sigma_range)
+      surface += _gaussian_hill(
+          x_grid=x_grid,
+          y_grid=y_grid,
+          center=point,
+          amp=amp,
+          sigma=sigma,
+      )
+
+    if spec.surface.noise.enabled and spec.surface.noise.scale > 0.0:
+      noise = rng.normal(loc=0.0, scale=1.0, size=surface.shape)
+      for _ in range(max(1, spec.surface.noise.blur_passes)):
+        noise = _blur2d(noise)
+      noise_std = float(np.std(noise))
+      if noise_std > 0.0:
+        noise = noise / noise_std
+      surface += spec.surface.noise.scale * noise
+
+    if spec.surface.global_trend.enabled and spec.surface.global_trend.strength > 0.0:
+      dx = x_grid - planted_global[0]
+      dy = y_grid - planted_global[1]
+      dist = np.sqrt(dx * dx + dy * dy)
+      max_dist = float(np.max(dist))
+      if max_dist > 0.0:
+        trend = 1.0 - dist / max_dist
+        surface += spec.surface.global_trend.strength * trend
+
+    surface = _normalize_surface(surface)
+    actual_peak, actual_height = _argmax_point(surface, x_coords, y_coords)
+
+    if np.linalg.norm(actual_peak - planted_global) > spec.surface.acceptance.max_peak_shift:
+      continue
+
+    return TerrainData(
+        x_coords=x_coords,
+        y_coords=y_coords,
+        surface=surface,
+        global_peak_point=actual_peak,
+        global_peak_height=actual_height,
+        local_peak_points=local_peaks,
+        planted_global_peak_point=planted_global,
     )
 
-  raise ValueError("Failed to generate a connected maze for the given seed.")
+  raise ValueError("Failed to generate terrain with a dominant global peak.")

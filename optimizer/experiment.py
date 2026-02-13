@@ -1,4 +1,4 @@
-"""Experiment orchestration for optimizer comparisons."""
+"""Experiment orchestration for mountain-surface optimizer comparisons."""
 
 from __future__ import annotations
 
@@ -8,46 +8,62 @@ from pathlib import Path
 
 import numpy as np
 
-from maze import LocalOptimaConfig, MazeSpec, generate_maze
-from objective import (
-    LocalOptimaTermConfig,
-    ObjectiveWeights,
-    PathObjective,
-    build_full_control_points,
-    sample_polyline,
+from maze import (
+    AcceptanceConfig,
+    GlobalPeakConfig,
+    GlobalTrendConfig,
+    LocalPeaksConfig,
+    NoiseConfig,
+    SurfaceConfig,
+    TerrainSpec,
+    generate_terrain,
 )
+from objective import ObjectiveWeights, SurfaceObjective
 from optimizers_impl import build_optimizer
+
+
+@dataclass(frozen=True)
+class StoppingConfig:
+  target_tol: float
+  height_tol: float
+  loss_tol: float
+  progress_tol: float
+  grad_tol: float
+  step_tol: float
+  patience: int
+
+
+@dataclass(frozen=True)
+class AnimationConfig:
+  enabled: bool
+  fps: int
+  stride: int
+  max_frames: int
 
 
 @dataclass(frozen=True)
 class RunConfig:
   seed: int
-  grid_size: tuple[int, int, int]
-  obstacle_density: float
-  start: tuple[int, int, int]
-  goal: tuple[int, int, int]
-  num_control_points: int
-  num_samples: int
-  steps: int
+  domain: tuple[float, float]
+  grid_resolution: int
+  max_iters: int
   gradient_eps: float
   init_noise_scale: float
   clip_grad_norm: float | None
-  blur_passes: int
+  initial_point: tuple[float, float] | None
   weights: ObjectiveWeights
-  local_optima: LocalOptimaConfig
+  stopping: StoppingConfig
+  animation: AnimationConfig
+  surface: SurfaceConfig
   optimizers: dict[str, dict]
 
 
-def _finite_difference_gradient(
-    loss_fn,
-    params: np.ndarray,
-    eps: float,
-) -> np.ndarray:
-  """Computes central-difference gradients."""
-  grad = np.zeros_like(params)
-  for i in range(params.size):
-    plus = params.copy()
-    minus = params.copy()
+def _finite_difference_gradient(loss_fn, point: np.ndarray, eps: float) -> np.ndarray:
+  """Central-difference gradient for 2D points."""
+  grad = np.zeros_like(point)
+  for i in range(point.size):
+    plus = point.copy()
+    minus = point.copy()
     plus[i] += eps
     minus[i] -= eps
     grad[i] = (loss_fn(plus) - loss_fn(minus)) / (2.0 * eps)
@@ -55,198 +71,299 @@ def _finite_difference_gradient(
 
 
 def _parse_config(raw: dict) -> RunConfig:
+  weights_raw = raw["weights"]
   weights = ObjectiveWeights(
-      length=float(raw["weights"]["length"]),
-      smoothness=float(raw["weights"]["smoothness"]),
-      obstacle=float(raw["weights"]["obstacle"]),
-      boundary=float(raw["weights"]["boundary"]),
-      local_optima=float(raw["weights"]["local_optima"]),
+      height=float(weights_raw.get("height", 1.0)),
+      boundary=float(weights_raw.get("boundary", 2.0)),
   )
-  local_optima = LocalOptimaConfig(
-      enabled=bool(raw["local_optima"]["enabled"]),
-      count=int(raw["local_optima"]["count"]),
-      strength=float(raw["local_optima"]["strength"]),
-      radius=float(raw["local_optima"]["radius"]),
-      min_distance_from_path=float(raw["local_optima"]["min_distance_from_path"]),
+
+  stop_raw = raw["stopping"]
+  stopping = StoppingConfig(
+      target_tol=float(stop_raw.get("target_tol", 1e-3)),
+      height_tol=float(stop_raw.get("height_tol", 1e-3)),
+      loss_tol=float(stop_raw.get("loss_tol", 1e-8)),
+      progress_tol=float(stop_raw.get("progress_tol", 1e-5)),
+      grad_tol=float(stop_raw.get("grad_tol", 1e-5)),
+      step_tol=float(stop_raw.get("step_tol", 1e-6)),
+      patience=int(stop_raw.get("patience", 30)),
   )
+
+  animation_raw = raw.get("animation", {})
+  animation = AnimationConfig(
+      enabled=bool(animation_raw.get("enabled", True)),
+      fps=int(animation_raw.get("fps", 10)),
+      stride=int(animation_raw.get("stride", 1)),
+      max_frames=int(animation_raw.get("max_frames", 240)),
+  )
+
+  surface_raw = raw["surface"]
+  global_peak_raw = surface_raw["global_peak"]
+  local_peaks_raw = surface_raw["local_peaks"]
+  noise_raw = surface_raw.get("noise", {})
+  trend_raw = surface_raw.get("global_trend", {})
+  acceptance_raw = surface_raw.get("acceptance", {})
+
+  surface = SurfaceConfig(
+      global_peak=GlobalPeakConfig(
+          amp=float(global_peak_raw["amp"]),
+          sigma=float(global_peak_raw["sigma"]),
+      ),
+      local_peaks=LocalPeaksConfig(
+          count=int(local_peaks_raw["count"]),
+          amp_range=(
+              float(local_peaks_raw["amp_range"][0]),
+              float(local_peaks_raw["amp_range"][1]),
+          ),
+          sigma_range=(
+              float(local_peaks_raw["sigma_range"][0]),
+              float(local_peaks_raw["sigma_range"][1]),
+          ),
+          min_dist_global=float(local_peaks_raw["min_dist_global"]),
+          min_dist_local=float(local_peaks_raw["min_dist_local"]),
+      ),
+      noise=NoiseConfig(
+          enabled=bool(noise_raw.get("enabled", True)),
+          scale=float(noise_raw.get("scale", 0.03)),
+          blur_passes=int(noise_raw.get("blur_passes", 2)),
+      ),
+      global_trend=GlobalTrendConfig(
+          enabled=bool(trend_raw.get("enabled", True)),
+          strength=float(trend_raw.get("strength", 0.12)),
+      ),
+      acceptance=AcceptanceConfig(
+          max_peak_shift=float(acceptance_raw.get("max_peak_shift", 0.07)),
+      ),
+  )
+
+  initial = raw.get("initial_point")
+  if initial is None:
+    initial_point = None
+  else:
+    initial_point = (float(initial[0]), float(initial[1]))
+
   return RunConfig(
       seed=int(raw["seed"]),
-      grid_size=tuple(raw["grid_size"]),
-      obstacle_density=float(raw["obstacle_density"]),
-      start=tuple(raw["start"]),
-      goal=tuple(raw["goal"]),
-      num_control_points=int(raw["num_control_points"]),
-      num_samples=int(raw["num_samples"]),
-      steps=int(raw["steps"]),
+      domain=(float(raw["domain"][0]), float(raw["domain"][1])),
+      grid_resolution=int(raw["grid_resolution"]),
+      max_iters=int(raw["max_iters"]),
       gradient_eps=float(raw["gradient_eps"]),
-      init_noise_scale=float(raw["init_noise_scale"]),
+      init_noise_scale=float(raw.get("init_noise_scale", 0.02)),
       clip_grad_norm=(
           float(raw["clip_grad_norm"])
           if raw.get("clip_grad_norm") is not None
           else None
       ),
-      blur_passes=int(raw.get("blur_passes", 3)),
+      initial_point=initial_point,
       weights=weights,
-      local_optima=local_optima,
+      stopping=stopping,
+      animation=animation,
+      surface=surface,
       optimizers=dict(raw["optimizers"]),
   )
 
 
-def _build_initial_params(cfg: RunConfig, rng: np.random.Generator) -> np.ndarray:
-  total_points = cfg.num_control_points
-  if total_points < 2:
-    raise ValueError("num_control_points must be at least 2.")
+def _sample_initial_point(
+    cfg: RunConfig,
+    target_point: np.ndarray,
+    rng: np.random.Generator,
+) -> np.ndarray:
+  low, high = cfg.domain
+  if cfg.initial_point is not None:
+    point = np.asarray(cfg.initial_point, dtype=float)
+  else:
+    domain_size = high - low
+    for _ in range(1000):
+      candidate = rng.uniform(low, high, size=2)
+      if np.linalg.norm(candidate - target_point) >= 0.35 * domain_size:
+        point = candidate
+        break
+    else:
+      point = rng.uniform(low, high, size=2)
 
-  start = np.asarray(cfg.start, dtype=float)
-  goal = np.asarray(cfg.goal, dtype=float)
-
-  alphas = np.linspace(0.0, 1.0, total_points)
-  points = (1.0 - alphas[:, None]) * start + alphas[:, None] * goal
-
-  if total_points > 2:
-    noise = rng.normal(
-        loc=0.0,
-        scale=cfg.init_noise_scale,
-        size=(total_points - 2, 3),
-    )
-    points[1:-1] += noise
-
-  upper = np.asarray(cfg.grid_size, dtype=float) - 1.0
-  points = np.clip(points, 0.0, upper)
-  return points[1:-1].reshape(-1)
+  point += rng.normal(loc=0.0, scale=cfg.init_noise_scale, size=2)
+  return np.clip(point, low, high)
 
 
 def _run_one_optimizer(
     name: str,
-    opt_cfg: dict,
-    initial_params: np.ndarray,
-    objective: PathObjective,
-    start: np.ndarray,
-    goal: np.ndarray,
-    num_samples: int,
-    steps: int,
-    grad_eps: float,
+    optimizer_cfg: dict,
+    initial_point: np.ndarray,
+    objective: SurfaceObjective,
+    target_point: np.ndarray,
+    target_height: float,
+    domain: tuple[float, float],
+    max_iters: int,
+    gradient_eps: float,
     clip_grad_norm: float | None,
+    stopping: StoppingConfig,
+    trajectory_stride: int,
 ) -> dict:
-  optimizer = build_optimizer(name, opt_cfg)
-  params = initial_params.copy()
+  optimizer = build_optimizer(name, optimizer_cfg)
+  low, high = domain
+
+  point = initial_point.copy()
   history: list[dict] = []
-  best_loss = float("inf")
-  best_path = None
+  trajectory: list[np.ndarray] = [point.copy()]
 
-  def loss_fn(flat_params: np.ndarray) -> float:
-    control_points = build_full_control_points(flat_params, start, goal)
-    total, _ = objective.evaluate(control_points)
-    return total
+  stable_counter = 0
+  no_progress_counter = 0
+  previous_loss: float | None = None
+  best_heights: list[float] = []
+  stop_reason = "max_iters"
 
-  for step in range(steps):
-    control_points = build_full_control_points(params, start, goal)
-    total, terms = objective.evaluate(control_points)
+  def loss_fn(query_point: np.ndarray) -> float:
+    loss, _ = objective.evaluate(query_point)
+    return loss
 
-    grad = _finite_difference_gradient(loss_fn, params, grad_eps)
+  for iter_idx in range(1, max_iters + 1):
+    loss, terms = objective.evaluate(point)
+    grad = _finite_difference_gradient(loss_fn, point, gradient_eps)
     grad_norm = float(np.linalg.norm(grad))
 
     if clip_grad_norm is not None and clip_grad_norm > 0.0 and grad_norm > clip_grad_norm:
       grad = grad * (clip_grad_norm / grad_norm)
       grad_norm = float(np.linalg.norm(grad))
 
-    next_params = optimizer.step(params, grad)
-    step_norm = float(np.linalg.norm(next_params - params))
-    params = next_params
+    new_point = optimizer.step(point, grad)
+    new_point = np.clip(new_point, low, high)
+    step_norm = float(np.linalg.norm(new_point - point))
+    point = new_point
 
-    sampled_path = sample_polyline(control_points, num_samples)
-    if total < best_loss:
-      best_loss = total
-      best_path = sampled_path.copy()
+    new_loss, new_terms = objective.evaluate(point)
+    distance_to_optimum = float(np.linalg.norm(point - target_point))
+    height_gap = abs(target_height - new_terms["height"])
 
     row = {
-      "iter": step,
-      "loss": float(total),
+      "iter": iter_idx,
+      "loss": float(new_loss),
+      "height": float(new_terms["height"]),
+      "boundary": float(new_terms["boundary"]),
       "grad_norm": grad_norm,
       "step_norm": step_norm,
-      "length": terms["length"],
-      "smoothness": terms["smoothness"],
-      "obstacle": terms["obstacle"],
-      "boundary": terms["boundary"],
-      "local_optima": terms["local_optima"],
+      "distance_to_optimum": distance_to_optimum,
+      "height_gap": float(height_gap),
     }
     history.append(row)
+    best_heights.append(max(row["height"], best_heights[-1] if best_heights else row["height"]))
 
-  final_control = build_full_control_points(params, start, goal)
-  final_path = sample_polyline(final_control, num_samples)
+    if iter_idx % max(1, trajectory_stride) == 0:
+      trajectory.append(point.copy())
+
+    reached_optimum = (
+        distance_to_optimum <= stopping.target_tol
+        or height_gap <= stopping.height_tol
+    )
+    if reached_optimum:
+      stop_reason = "reached_optimum"
+      break
+
+    if grad_norm < stopping.grad_tol and step_norm < stopping.step_tol:
+      stable_counter += 1
+    else:
+      stable_counter = 0
+    if stable_counter >= stopping.patience:
+      stop_reason = "converged"
+      break
+
+    if previous_loss is not None and abs(previous_loss - new_loss) < stopping.loss_tol:
+      no_progress_counter += 1
+    else:
+      no_progress_counter = 0
+    previous_loss = new_loss
+
+    if no_progress_counter >= stopping.patience:
+      stop_reason = "no_progress"
+      break
+
+    if len(best_heights) > stopping.patience:
+      window_gain = best_heights[-1] - best_heights[-1 - stopping.patience]
+      if window_gain < stopping.progress_tol:
+        stop_reason = "converged"
+        break
+
+  if np.linalg.norm(trajectory[-1] - point) > 1e-12:
+    trajectory.append(point.copy())
+
+  final_loss, final_terms = objective.evaluate(point)
   return {
     "name": name,
     "history": history,
-    "final_path": final_path,
-    "best_path": best_path if best_path is not None else final_path,
-    "final_control_points": final_control,
+    "trajectory": np.vstack(trajectory),
+    "stop_reason": stop_reason,
+    "iterations": len(history),
+    "final_point": point,
+    "final_loss": float(final_loss),
+    "final_height": float(final_terms["height"]),
+    "final_distance_to_optimum": float(np.linalg.norm(point - target_point)),
+    "best_height": float(max((row["height"] for row in history), default=final_terms["height"])),
   }
 
 
 def run_experiment(config_path: Path, output_dir: Path) -> dict:
-  """Runs optimizer comparison and writes artifacts."""
+  """Runs optimizer benchmark and writes artifacts."""
   with config_path.open("r", encoding="utf-8") as f:
-    raw_cfg = json.load(f)
-  cfg = _parse_config(raw_cfg)
+    raw_config = json.load(f)
+  cfg = _parse_config(raw_config)
 
-  maze_spec = MazeSpec(
-      grid_size=cfg.grid_size,
-      obstacle_density=cfg.obstacle_density,
-      start=cfg.start,
-      goal=cfg.goal,
-      blur_passes=cfg.blur_passes,
-      local_optima=cfg.local_optima,
-  )
-  maze_data = generate_maze(maze_spec, seed=cfg.seed)
-
-  objective = PathObjective(
-      maze=maze_data,
-      weights=cfg.weights,
-      num_samples=cfg.num_samples,
-      local_optima_cfg=LocalOptimaTermConfig(
-          enabled=cfg.local_optima.enabled,
-          strength=cfg.local_optima.strength,
-          radius=cfg.local_optima.radius,
+  terrain = generate_terrain(
+      TerrainSpec(
+          domain=cfg.domain,
+          grid_resolution=cfg.grid_resolution,
+          surface=cfg.surface,
       ),
+      seed=cfg.seed,
   )
+  objective = SurfaceObjective(terrain=terrain, weights=cfg.weights)
 
   rng = np.random.default_rng(cfg.seed)
-  initial_params = _build_initial_params(cfg, rng)
+  initial_point = _sample_initial_point(
+      cfg=cfg,
+      target_point=terrain.global_peak_point,
+      rng=rng,
+  )
 
   output_dir.mkdir(parents=True, exist_ok=True)
   results: dict[str, dict] = {}
 
-  for name, opt_cfg in cfg.optimizers.items():
-    if not bool(opt_cfg.get("enabled", True)):
+  for name, optimizer_cfg in cfg.optimizers.items():
+    if not bool(optimizer_cfg.get("enabled", True)):
       continue
-    result = _run_one_optimizer(
+    results[name] = _run_one_optimizer(
         name=name,
-        opt_cfg=opt_cfg,
-        initial_params=initial_params,
+        optimizer_cfg=optimizer_cfg,
+        initial_point=initial_point,
         objective=objective,
-        start=maze_data.start,
-        goal=maze_data.goal,
-        num_samples=cfg.num_samples,
-        steps=cfg.steps,
-        grad_eps=cfg.gradient_eps,
+        target_point=terrain.global_peak_point,
+        target_height=terrain.global_peak_height,
+        domain=cfg.domain,
+        max_iters=cfg.max_iters,
+        gradient_eps=cfg.gradient_eps,
         clip_grad_norm=cfg.clip_grad_norm,
+        stopping=cfg.stopping,
+        trajectory_stride=cfg.animation.stride,
     )
-    results[name] = result
 
   serializable = {
-    "config": raw_cfg,
-    "maze": {
-      "grid_size": list(maze_data.occupancy.shape),
-      "obstacle_count": int(np.sum(maze_data.occupancy)),
-      "attractors": maze_data.attractors.tolist(),
-      "start": maze_data.start.tolist(),
-      "goal": maze_data.goal.tolist(),
+    "config": raw_config,
+    "terrain": {
+      "domain": list(cfg.domain),
+      "grid_resolution": cfg.grid_resolution,
+      "global_peak_point": terrain.global_peak_point.tolist(),
+      "global_peak_height": terrain.global_peak_height,
+      "planted_global_peak_point": terrain.planted_global_peak_point.tolist(),
+      "local_peak_points": terrain.local_peak_points.tolist(),
+      "initial_point": initial_point.tolist(),
     },
     "results": {
       name: {
+        "stop_reason": value["stop_reason"],
+        "iterations": value["iterations"],
+        "final_point": value["final_point"].tolist(),
+        "final_loss": value["final_loss"],
+        "final_height": value["final_height"],
+        "final_distance_to_optimum": value["final_distance_to_optimum"],
+        "best_height": value["best_height"],
         "history": value["history"],
-        "final_control_points": value["final_control_points"].tolist(),
-        "final_path": value["final_path"].tolist(),
       }
       for name, value in results.items()
     },
@@ -256,24 +373,44 @@ def run_experiment(config_path: Path, output_dir: Path) -> dict:
     json.dump(serializable, f, indent=2)
 
   try:
-    from visualize import save_metric_plots, save_path_comparison
-
-    histories = {k: v["history"] for k, v in results.items()}
-    paths = {k: v["final_path"] for k, v in results.items()}
-    save_metric_plots(histories, output_dir / "metrics.png")
-    save_path_comparison(
-        occupancy=maze_data.occupancy,
-        start=maze_data.start,
-        goal=maze_data.goal,
-        attractors=maze_data.attractors,
-        final_paths=paths,
-        output_path=output_dir / "paths.png",
+    from visualize import (
+      save_metrics,
+      save_surface_3d,
+      save_surface_animation,
+      save_surface_contour,
     )
-  except ModuleNotFoundError:
+
+    trajectories = {name: value["trajectory"] for name, value in results.items()}
+    histories = {name: value["history"] for name, value in results.items()}
+    stop_reasons = {name: value["stop_reason"] for name, value in results.items()}
+
+    save_surface_3d(
+        terrain=terrain,
+        trajectories=trajectories,
+        output_path=output_dir / "surface_3d.png",
+    )
+    save_surface_contour(
+        terrain=terrain,
+        trajectories=trajectories,
+        output_path=output_dir / "surface_contour.png",
+    )
+    save_metrics(histories=histories, output_path=output_dir / "metrics.png")
+
+    if cfg.animation.enabled:
+      save_surface_animation(
+          terrain=terrain,
+          trajectories=trajectories,
+          stop_reasons=stop_reasons,
+          output_path=output_dir / "optimizer_surface_animation.gif",
+          fps=cfg.animation.fps,
+          max_frames=cfg.animation.max_frames,
+      )
+  except Exception as exc:
     serializable["plots"] = {
         "generated": False,
-        "reason": "matplotlib is not installed",
+        "reason": str(exc),
     }
     with (output_dir / "results.json").open("w", encoding="utf-8") as f:
       json.dump(serializable, f, indent=2)
+
   return serializable
